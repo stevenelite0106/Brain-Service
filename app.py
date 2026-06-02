@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -109,11 +110,41 @@ async def render_endpoint(
 
     On CPU this takes ~30–60s for a 60s recording. On GPU ~5–10s.
     """
+    # The browser records in WebM/Opus by default but TRIBE only accepts
+    # .flac/.mp3/.ogg/.wav. Save the upload as-is to a temp file, then
+    # transcode to mono 16kHz WAV (what WhisperX inside TRIBE expects).
     suffix = Path(audio.filename or "recording.webm").suffix or ".webm"
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(await audio.read())
-        audio_path = Path(tmp.name)
+        raw_path = Path(tmp.name)
+
+    audio_path = raw_path.with_suffix(".wav")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(raw_path),
+                "-ar", "16000",  # 16 kHz — WhisperX standard
+                "-ac", "1",      # mono
+                str(audio_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.error("ffmpeg transcode failed: %s", exc.stderr.decode("utf-8", "ignore"))
+        try:
+            raw_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail="audio transcode failed")
+
+    # Original webm no longer needed after transcode
+    try:
+        raw_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     try:
         logger.info("running TRIBE on %s", audio_path)
