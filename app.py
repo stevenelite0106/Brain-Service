@@ -2,6 +2,20 @@
 
 POST /render — multipart audio in, brain PNG + region metadata out.
 
+Architecture:
+  - All heavy artifacts (TRIBE checkpoint, nilearn atlases, fsaverage5 mesh,
+    optional warmup render that primes WhisperX / Llama / Wav2Vec2 caches)
+    load at startup via FastAPI's `lifespan` handler. Uvicorn won't accept
+    connections until startup finishes.
+  - `/health` is a fast liveness probe (always 200 once the process is up).
+  - `/ready` returns 200 only after startup warmup has completed
+    successfully. Use this for orchestration; Vercel should consume `/ready`
+    before sending real booth traffic.
+  - `/warmup` triggers a full warmup-render manually (audio optional;
+    without audio it just ensures the TRIBE model + atlases are loaded).
+  - `/render` runs inference. Should be fast (~30–60s CPU, ~5–10s GPU)
+    because everything is already in memory + on disk by this point.
+
 Auth: optional bearer token via SERVICE_AUTH_TOKEN env var. If set, clients
 (in our case the Vercel /api/analyze route) must present
 `Authorization: Bearer <token>`.
@@ -14,6 +28,8 @@ import base64
 import logging
 import subprocess
 import tempfile
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -31,7 +47,105 @@ logging.basicConfig(
 )
 logger = logging.getLogger("brain-service")
 
-app = FastAPI(title="Space of Mind — brain-service", version="0.1.0")
+
+# ─────────────────────────────────────────────────────────────────────────
+# Readiness state — set by the lifespan handler. /ready reads this.
+# ─────────────────────────────────────────────────────────────────────────
+class _State:
+    started_at: float = 0.0
+    tribe_loaded: bool = False
+    atlases_loaded: bool = False
+    full_warmup_done: bool = False
+    last_error: str | None = None
+
+
+STATE = _State()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Lifespan — runs once at process start and once at shutdown. Models load
+# here so the first user-facing /render request doesn't pay cold-start cost.
+# ─────────────────────────────────────────────────────────────────────────
+WARMUP_AUDIO_PATH = Path(__file__).parent / "warmup-audio.wav"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Block process startup until models + atlases are loaded."""
+    STATE.started_at = time.time()
+    logger.info("startup: warming brain-service ...")
+
+    # ── 1. TRIBE model — multi-GB checkpoint into memory ───────────────
+    try:
+        t0 = time.time()
+        logger.info("startup [1/3]: loading TRIBE model ...")
+        inference.get_model()
+        STATE.tribe_loaded = True
+        logger.info("startup [1/3]: TRIBE loaded in %.1fs", time.time() - t0)
+    except Exception as exc:
+        STATE.last_error = f"TRIBE load failed: {exc}"
+        logger.exception("startup [1/3] FAILED — service will be /health-up but /ready-down")
+        # Don't raise — let the container come up so the operator can
+        # inspect /ready and the logs. /render will surface the same error.
+
+    # ── 2. nilearn atlases — fsaverage5 mesh + Destrieux parcellation ──
+    try:
+        t0 = time.time()
+        logger.info("startup [2/3]: prefetching nilearn atlases ...")
+        from nilearn import datasets
+        datasets.fetch_atlas_surf_destrieux()
+        datasets.fetch_surf_fsaverage("fsaverage5")
+        STATE.atlases_loaded = True
+        logger.info("startup [2/3]: atlases ready in %.1fs", time.time() - t0)
+    except Exception as exc:
+        STATE.last_error = f"atlas prefetch failed: {exc}"
+        logger.exception("startup [2/3] FAILED — atlases will lazy-load on first /render")
+
+    # ── 3. Full warmup-render — primes WhisperX uvx env, Llama, Wav2Vec2
+    # Only runs if a warmup audio file exists in the image. If you don't
+    # ship one, the FIRST real /render call pays the download cost
+    # (~4 GB WhisperX env + several GB of Llama + ~1 GB Wav2Vec2).
+    if WARMUP_AUDIO_PATH.exists():
+        try:
+            t0 = time.time()
+            logger.info(
+                "startup [3/3]: running warmup-render on %s (primes WhisperX + Llama + Wav2Vec2 caches) ...",
+                WARMUP_AUDIO_PATH.name,
+            )
+            preds, _ = inference.run_tribe(WARMUP_AUDIO_PATH)
+            _ = inference.pick_peak_timestep(preds)
+            STATE.full_warmup_done = True
+            logger.info("startup [3/3]: full warmup-render complete in %.1fs", time.time() - t0)
+        except Exception as exc:
+            STATE.last_error = f"warmup-render failed: {exc}"
+            logger.exception("startup [3/3] FAILED — first real /render will redo this work")
+    else:
+        logger.info(
+            "startup [3/3]: SKIPPED — no %s in image. First real /render will pay "
+            "download cost (~4 GB WhisperX env + several GB Llama + Wav2Vec2). "
+            "To enable: drop a short test WAV at brain-service/warmup-audio.wav.",
+            WARMUP_AUDIO_PATH.name,
+        )
+
+    elapsed = time.time() - STATE.started_at
+    logger.info(
+        "startup complete in %.1fs (tribe=%s, atlases=%s, full_warmup=%s)",
+        elapsed,
+        STATE.tribe_loaded,
+        STATE.atlases_loaded,
+        STATE.full_warmup_done,
+    )
+
+    yield
+
+    # No shutdown work needed; let the OS reclaim memory.
+
+
+app = FastAPI(
+    title="Space of Mind — brain-service",
+    version="0.2.0",
+    lifespan=lifespan,
+)
 
 # Lock CORS down to nothing by default; this service is called server→server
 # from Vercel, never from a browser.
@@ -77,18 +191,55 @@ class RenderOut(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    """Liveness probe. Does NOT load the model — Railway hits this often."""
+    """Liveness probe. Process is up — does NOT indicate readiness."""
     return {"ok": True, "service": "brain-service"}
+
+
+@app.get("/ready")
+def ready() -> dict:
+    """
+    Readiness probe. Returns 200 only when startup warmup has completed
+    enough for /render to succeed quickly. Vercel / monitoring should
+    poll this before routing real traffic.
+    """
+    is_ready = STATE.tribe_loaded and STATE.atlases_loaded
+    response = {
+        "ready": is_ready,
+        "tribe_loaded": STATE.tribe_loaded,
+        "atlases_loaded": STATE.atlases_loaded,
+        "full_warmup_done": STATE.full_warmup_done,
+        "uptime_seconds": round(time.time() - STATE.started_at, 1) if STATE.started_at else 0,
+        "last_error": STATE.last_error,
+    }
+    if not is_ready:
+        raise HTTPException(status_code=503, detail=response)
+    return response
 
 
 @app.get("/warmup")
 def warmup(_: None = Depends(_check_auth)) -> dict:
     """
-    Force the TRIBE checkpoint to load. Call this once after deploy so the
-    first user-facing request doesn't pay the ~30s cold start.
+    Manual full warmup. Idempotent — re-loads TRIBE if not already loaded,
+    re-fetches atlases. Useful if /ready reported a partial-warmup failure
+    you've since fixed (e.g. HF_TOKEN updated).
+
+    For a TRUE full warmup that also primes WhisperX/Llama/Wav2Vec2 caches,
+    POST a real audio file to /render once after deploy.
     """
-    inference.get_model()
-    return {"ok": True, "warmed": True}
+    if not STATE.tribe_loaded:
+        inference.get_model()
+        STATE.tribe_loaded = True
+    if not STATE.atlases_loaded:
+        from nilearn import datasets
+        datasets.fetch_atlas_surf_destrieux()
+        datasets.fetch_surf_fsaverage("fsaverage5")
+        STATE.atlases_loaded = True
+    return {
+        "ok": True,
+        "tribe_loaded": STATE.tribe_loaded,
+        "atlases_loaded": STATE.atlases_loaded,
+        "full_warmup_done": STATE.full_warmup_done,
+    }
 
 
 @app.post("/render", response_model=RenderOut)
@@ -109,6 +260,8 @@ async def render_endpoint(
       6. Return base64-encoded PNG + structured region data.
 
     On CPU this takes ~30–60s for a 60s recording. On GPU ~5–10s.
+    Assumes startup warmup completed — if not, first call may pay an
+    extra ~5–10 min for HF model downloads.
     """
     # The browser records in WebM/Opus by default but TRIBE only accepts
     # .flac/.mp3/.ogg/.wav. Save the upload as-is to a temp file, then
@@ -156,6 +309,10 @@ async def render_endpoint(
         png_bytes = render_mod.render_to_png(peak_vec, decoded)
 
         b64 = base64.b64encode(png_bytes).decode("ascii") if return_b64.lower() == "true" else ""
+
+        # Mark full warmup as done — any successful render means all caches
+        # are populated, future requests are fast.
+        STATE.full_warmup_done = True
 
         return RenderOut(
             brain_image_base64=b64,

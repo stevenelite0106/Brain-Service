@@ -131,6 +131,22 @@ curl -H "Authorization: Bearer $SERVICE_AUTH_TOKEN" \
      https://your-brain-service.up.railway.app/warmup
 ```
 
+### Optional: pre-prime the full pipeline at startup
+
+By default the service loads only the **TRIBE checkpoint** + **nilearn atlases** at startup. The first real `/render` call still pays a one-time download for WhisperX (~4 GB), Llama-3.2-3B (~6 GB), and Wav2Vec2 (~1 GB) — usually 5–10 min.
+
+To eliminate that first-render delay, drop a short audio file at `brain-service/warmup-audio.wav` before building. The lifespan handler will run a full render on it during startup, populating every download cache.
+
+Quick way to make one from any existing webm/mp3:
+
+```powershell
+ffmpeg -i path/to/any-recording.webm -t 3 -ar 16000 -ac 1 brain-service/warmup-audio.wav
+```
+
+3 seconds of any English speech is enough. The file ships inside the Docker image (~50–100 KB). Container startup will then take longer (~5–10 min for first deploy with cold caches; ~30s on subsequent deploys once caches land on the mounted volume), but the first real booth request is fast.
+
+If you skip this, everything still works — the first attendee just waits longer.
+
 ### Wiring back to Vercel
 
 Add two env vars to your Vercel project:
@@ -149,11 +165,30 @@ without one — the rest of the analysis is unaffected.
 ## API
 
 ### `GET /health`
-Liveness probe. Doesn't load the model. Railway hits this every few seconds.
+Liveness probe — returns 200 as soon as the process is up. Does NOT
+indicate readiness. Don't use this for routing decisions.
+
+### `GET /ready`
+Readiness probe. Returns **503** while startup warmup is in progress and
+**200** once TRIBE + atlases are loaded. Railway's healthcheck is wired
+to this path so traffic only routes when the deploy can actually serve.
+
+```jsonc
+// 200 response
+{
+  "ready": true,
+  "tribe_loaded": true,
+  "atlases_loaded": true,
+  "full_warmup_done": true,    // false until first /render succeeds
+  "uptime_seconds": 47.3,
+  "last_error": null
+}
+```
 
 ### `GET /warmup`
-Forces the TRIBE checkpoint to load into memory. Gated by
-`SERVICE_AUTH_TOKEN` if set. Call this once after deploy.
+Manual force-warmup. Idempotent — re-runs missing startup steps. Useful
+if `/ready` reported a partial-warmup failure you've since fixed
+(e.g. `HF_TOKEN` updated after deploy). Gated by `SERVICE_AUTH_TOKEN`.
 
 ### `POST /render`
 Multipart form with one file field `audio`. Optional auth header.
