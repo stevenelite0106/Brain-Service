@@ -57,11 +57,12 @@ RUN if [ "$COMPUTE" = "gpu" ]; then \
     fi \
  && pip install -r requirements.txt
 
-# Install tribev2 from Meta's research repo. If this URL stops resolving,
-# point this line at the wheel or git ref Meta currently publishes.
-# (You can also `pip install -e .` from a vendored copy by COPYing it in
-# before this line.)
-RUN pip install --no-deps "git+https://github.com/facebookresearch/tribev2.git@main"
+# Install tribev2 from Meta's research repo + its transitive deps.
+# tribev2 pulls in exca, einops, hydra-core, omegaconf, etc.  We let pip
+# resolve these; if they clash with anything in requirements.txt, the
+# build will fail loudly with a version conflict (preferable to silent
+# ModuleNotFoundError at runtime).
+RUN pip install "git+https://github.com/facebookresearch/tribev2.git@main"
 
 COPY . /app
 
