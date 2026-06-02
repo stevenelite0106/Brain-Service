@@ -66,7 +66,22 @@ STATE = _State()
 # Lifespan — runs once at process start and once at shutdown. Models load
 # here so the first user-facing /render request doesn't pay cold-start cost.
 # ─────────────────────────────────────────────────────────────────────────
-WARMUP_AUDIO_PATH = Path(__file__).parent / "warmup-audio.wav"
+def _find_warmup_audio() -> Path | None:
+    """Return the first existing candidate warmup audio path, or None."""
+    here = Path(__file__).parent
+    candidates = [
+        here / "assets" / "test.wav",
+        here / "assets" / "test.webm",
+        here / "assets" / "warmup-audio.wav",
+        here / "warmup-audio.wav",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+WARMUP_AUDIO_PATH = _find_warmup_audio()
 
 
 @asynccontextmanager
@@ -105,12 +120,12 @@ async def lifespan(app: FastAPI):
     # Only runs if a warmup audio file exists in the image. If you don't
     # ship one, the FIRST real /render call pays the download cost
     # (~4 GB WhisperX env + several GB of Llama + ~1 GB Wav2Vec2).
-    if WARMUP_AUDIO_PATH.exists():
+    if WARMUP_AUDIO_PATH is not None:
         try:
             t0 = time.time()
             logger.info(
                 "startup [3/3]: running warmup-render on %s (primes WhisperX + Llama + Wav2Vec2 caches) ...",
-                WARMUP_AUDIO_PATH.name,
+                WARMUP_AUDIO_PATH,
             )
             preds, _ = inference.run_tribe(WARMUP_AUDIO_PATH)
             _ = inference.pick_peak_timestep(preds)
@@ -121,10 +136,10 @@ async def lifespan(app: FastAPI):
             logger.exception("startup [3/3] FAILED — first real /render will redo this work")
     else:
         logger.info(
-            "startup [3/3]: SKIPPED — no %s in image. First real /render will pay "
-            "download cost (~4 GB WhisperX env + several GB Llama + Wav2Vec2). "
-            "To enable: drop a short test WAV at brain-service/warmup-audio.wav.",
-            WARMUP_AUDIO_PATH.name,
+            "startup [3/3]: SKIPPED — no warmup audio found. First real /render "
+            "will pay download cost (~4 GB WhisperX env + several GB Llama + "
+            "Wav2Vec2). To enable: drop a short WAV at one of: "
+            "assets/test.wav, assets/test.webm, assets/warmup-audio.wav, warmup-audio.wav."
         )
 
     elapsed = time.time() - STATE.started_at
@@ -266,13 +281,17 @@ async def render_endpoint(
     # The browser records in WebM/Opus by default but TRIBE only accepts
     # .flac/.mp3/.ogg/.wav. Save the upload as-is to a temp file, then
     # transcode to mono 16kHz WAV (what WhisperX inside TRIBE expects).
+    # Use a SECOND distinct tempfile for the output so ffmpeg doesn't refuse
+    # to overwrite its own input (happens when the upload is already .wav).
     suffix = Path(audio.filename or "recording.webm").suffix or ".webm"
 
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(await audio.read())
-        raw_path = Path(tmp.name)
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_in:
+        tmp_in.write(await audio.read())
+        raw_path = Path(tmp_in.name)
 
-    audio_path = raw_path.with_suffix(".wav")
+    with tempfile.NamedTemporaryFile(suffix=".16k.wav", delete=False) as tmp_out:
+        audio_path = Path(tmp_out.name)
+
     try:
         subprocess.run(
             [
@@ -286,14 +305,21 @@ async def render_endpoint(
             capture_output=True,
         )
     except subprocess.CalledProcessError as exc:
-        logger.error("ffmpeg transcode failed: %s", exc.stderr.decode("utf-8", "ignore"))
-        try:
-            raw_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise HTTPException(status_code=400, detail="audio transcode failed")
+        stderr = exc.stderr.decode("utf-8", "ignore") if exc.stderr else "(empty)"
+        logger.error("ffmpeg transcode failed:\n%s", stderr)
+        for p in (raw_path, audio_path):
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
+        # Surface the ffmpeg stderr in the response so the caller can debug
+        # without digging through Railway logs.
+        raise HTTPException(
+            status_code=400,
+            detail=f"audio transcode failed: {stderr.strip()[:400]}",
+        )
 
-    # Original webm no longer needed after transcode
+    # Original upload no longer needed after transcode
     try:
         raw_path.unlink(missing_ok=True)
     except Exception:
