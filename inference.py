@@ -41,15 +41,44 @@ _MODEL = None  # singleton — TribeModel instance once loaded
 _orig_subprocess_run = _subprocess_mod.run
 
 
+def _force_arg(cmd: list, flag: str, value: str) -> tuple[list, str | None]:
+    """Set `--flag value` in cmd, replacing the existing value if present.
+    Returns (new_cmd, old_value_or_None)."""
+    new_cmd = list(cmd)
+    if flag in new_cmd:
+        idx = new_cmd.index(flag)
+        if idx + 1 < len(new_cmd):
+            old = str(new_cmd[idx + 1])
+            new_cmd[idx + 1] = value
+            return new_cmd, old
+    new_cmd.extend([flag, value])
+    return new_cmd, None
+
+
 def _patched_subprocess_run(cmd, *args, **kwargs):
+    """
+    Force whisperx invocations to CPU + int8 compute type.
+
+    tribev2.eventstransforms._get_transcript_from_audio hard-codes the
+    whisperx CLI command including --compute_type and --device with values
+    that assume CUDA. On Railway's CPU host this fails with
+        ValueError: Requested float16 compute type, but the target device
+        or backend do not support efficient float16 computation.
+
+    We REPLACE whatever values tribev2 supplied with `--compute_type int8`
+    and `--device cpu`. int8 is faster-whisper's recommended CPU quantization
+    (~4x faster than float32, negligible accuracy loss for speech).
+    """
     try:
         if isinstance(cmd, list):
             cmd_strs = [str(c) for c in cmd]
-            mentions_whisperx = any("whisperx" in s.lower() for s in cmd_strs)
-            has_compute_type = any(s == "--compute_type" for s in cmd_strs)
-            if mentions_whisperx and not has_compute_type:
-                cmd = list(cmd) + ["--compute_type", "int8"]
-                logger.info("[whisperx-shim] injected --compute_type int8")
+            if any("whisperx" in s.lower() for s in cmd_strs):
+                cmd, old_ct = _force_arg(cmd, "--compute_type", "int8")
+                cmd, old_dev = _force_arg(cmd, "--device", "cpu")
+                logger.info(
+                    "[whisperx-shim] forced --compute_type int8 (was %r), --device cpu (was %r)",
+                    old_ct, old_dev,
+                )
     except Exception as exc:
         logger.warning("[whisperx-shim] patch failed: %s", exc)
     return _orig_subprocess_run(cmd, *args, **kwargs)
