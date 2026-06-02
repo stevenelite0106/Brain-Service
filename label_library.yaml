@@ -1,0 +1,227 @@
+# Scientific label library — canonical mapping from functional region
+# to scientifically-cited name, anatomical descriptor, function summary,
+# and source citations. The LLM uses function_summary as grounding so it
+# cannot hallucinate or paraphrase region claims.
+#
+# Each `destrieux_labels` field lists the Destrieux atlas region names
+# whose vertices belong to this functional cluster on the fsaverage5 mesh.
+# This is how we go from TRIBE's vertex-level output to a named region.
+#
+# Source: github.com/sshandhra1/self-talk-mirror/libraries/label_library.yaml
+# License compliance: Space of Mind uses TRIBE v2 under CC BY-NC for
+# research / internal demo only.
+
+- id: DMN_CORE
+  scientific_name: Default Mode Network
+  anatomical_descriptor: medial prefrontal cortex + posterior cingulate cortex
+  yeo_network: Default
+  short_function: self-referential thought; internal narration; autobiographical memory
+  function_summary: >
+    The Default Mode Network is the most-studied network in cognitive
+    neuroscience for self-referential processing. It activates during
+    mind-wandering, internal monologue, and any task requiring the brain
+    to refer to oneself. Hyperactivity in this network is the most
+    reliably reproduced neuroimaging finding in depressive rumination.
+  destrieux_labels:
+    - G_front_sup
+    - G_and_S_cingul-Mid-Ant
+    - G_and_S_cingul-Mid-Post
+    - G_cingul-Post-dorsal
+    - G_cingul-Post-ventral
+    - G_precuneus
+  citations:
+    - "Raichle ME et al. A default mode of brain function. PNAS 2001."
+    - "Buckner RL, Andrews-Hanna JR, Schacter DL. The brain's default network. Ann NY Acad Sci 2008."
+    - "Hamilton JP et al. Depressive rumination, the default-mode network. Biol Psychiatry 2015."
+
+- id: RTPJ_MENTALIZING
+  scientific_name: Right Temporo-Parietal Junction
+  anatomical_descriptor: right temporo-parietal junction (rTPJ)
+  yeo_network: Default
+  short_function: mentalizing; modeling others' minds; social comparison
+  function_summary: >
+    The right TPJ is preferentially engaged when reasoning about another
+    person's mental state — what they believe, feel, or might think about
+    you. Identified by Saxe & Kanwisher (2003) as a core node of the
+    mentalizing network. Most active during social comparison and
+    perspective-taking.
+  destrieux_labels:
+    - G_pariet_inf-Angular
+    - G_temporal_middle
+    - S_temporal_sup
+  citations:
+    - "Saxe R, Kanwisher N. People thinking about thinking people. NeuroImage 2003."
+    - "Schurz M et al. Fractionating theory of mind. Neurosci Biobehav Rev 2014."
+
+- id: DMPFC_EVAL
+  scientific_name: Dorsomedial Prefrontal Cortex
+  anatomical_descriptor: dorsomedial prefrontal cortex (dmPFC)
+  yeo_network: Default
+  short_function: social evaluation; moral judgment; self vs. other distinctions
+  function_summary: >
+    The dorsomedial prefrontal cortex evaluates behavior — both your own
+    and others' — against internalized social and moral standards. It is
+    the region most consistently engaged by 'should' statements and by
+    moral-violation paradigms.
+  destrieux_labels:
+    - G_front_sup
+    - G_and_S_paracentral
+  citations:
+    - "Amodio DM, Frith CD. Meeting of minds: the medial frontal cortex and social cognition. Nat Rev Neurosci 2006."
+    - "Denny BT et al. A meta-analysis of functional neuroimaging studies of self- and other judgments. JoCN 2012."
+
+- id: VMPFC_VALUATION
+  scientific_name: Ventromedial Prefrontal Cortex
+  anatomical_descriptor: ventromedial prefrontal cortex (vmPFC)
+  yeo_network: Default
+  short_function: value assignment; reward; self-worth
+  function_summary: >
+    The vmPFC computes subjective value — how good or bad something is
+    for you. It activates for monetary reward, food reward, social reward,
+    and during self-evaluation. The most reproducible 'valuation' region
+    in human neuroimaging.
+  destrieux_labels:
+    - G_orbital
+    - G_rectus
+    - S_orbital-H_Shaped
+    - S_orbital_med-olfact
+  citations:
+    - "Bartra O, McGuire JT, Kable JW. The valuation system: a coordinate-based meta-analysis. NeuroImage 2013."
+    - "Roy M, Shohamy D, Wager TD. Ventromedial prefrontal-subcortical systems and the generation of affective meaning. Trends Cogn Sci 2012."
+
+- id: SALIENCE_DACC
+  scientific_name: Dorsal Anterior Cingulate Cortex
+  anatomical_descriptor: dorsal anterior cingulate cortex (dACC)
+  yeo_network: Salience/Ventral Attention
+  short_function: salience detection; conflict monitoring; threat alerting
+  function_summary: >
+    The dorsal ACC is the alerting hub of the salience network. It fires
+    when something important demands attention — physical pain, social
+    threat, prediction errors, conflict. Paired with the anterior insula,
+    it forms the brain's 'something is going on' system.
+  destrieux_labels:
+    - G_and_S_cingul-Ant
+    - S_pericallosal
+  citations:
+    - "Seeley WW et al. Dissociable intrinsic connectivity networks for salience processing. J Neurosci 2007."
+    - "Shackman AJ et al. The integration of negative affect, pain and cognitive control in the cingulate cortex. Nat Rev Neurosci 2011."
+
+- id: ANT_INSULA_INTEROCEPTION
+  scientific_name: Right Anterior Insula
+  anatomical_descriptor: right anterior insula
+  yeo_network: Salience/Ventral Attention
+  short_function: interoception; bodily awareness; visceral feeling
+  function_summary: >
+    The right anterior insula is the brain's interoceptive cortex — it
+    integrates signals from the heart, lungs, gut, and skin into a
+    conscious sense of how the body feels from the inside. Activation
+    correlates with awareness of heartbeat, breath, and emotional bodily
+    sensations.
+  destrieux_labels:
+    - G_insular_short
+    - S_circular_insula_ant
+    - S_circular_insula_sup
+  citations:
+    - "Craig AD. How do you feel? Interoception: the sense of the physiological condition of the body. Nat Rev Neurosci 2002."
+    - "Critchley HD, Garfinkel SN. Interoception and emotion. Curr Opin Psychol 2017."
+
+- id: DLPFC_CONTROL
+  scientific_name: Dorsolateral Prefrontal Cortex
+  anatomical_descriptor: dorsolateral prefrontal cortex (dlPFC)
+  yeo_network: Frontoparietal Control
+  short_function: cognitive control; working memory; effortful regulation
+  function_summary: >
+    The dlPFC supports executive function — working memory, cognitive
+    control, top-down regulation of attention and emotion. It is the
+    region engaged when you deliberately try to override an impulse or
+    redirect a thought.
+  destrieux_labels:
+    - G_front_middle
+    - S_front_middle
+    - S_front_sup
+  citations:
+    - "Miller EK, Cohen JD. An integrative theory of prefrontal cortex function. Annu Rev Neurosci 2001."
+    - "Ochsner KN, Gross JJ. The cognitive control of emotion. Trends Cogn Sci 2005."
+
+- id: BROCA_LANGUAGE
+  scientific_name: Broca's Area
+  anatomical_descriptor: left inferior frontal gyrus (Brodmann areas 44/45)
+  yeo_network: Language
+  short_function: language production; syntactic processing
+  function_summary: >
+    Broca's area, in the left inferior frontal gyrus, is the canonical
+    language-production region. Damage produces non-fluent aphasia. In
+    healthy listeners it activates strongly during both spoken language
+    perception and inner speech.
+  destrieux_labels:
+    - G_front_inf-Opercular
+    - G_front_inf-Triangul
+    - G_front_inf-Orbital
+  citations:
+    - "Fedorenko E et al. New method for fMRI investigations of language. J Neurophysiol 2010."
+    - "Hagoort P. On Broca, brain, and binding. Cogn Sci 2005."
+
+- id: WERNICKE_LANGUAGE
+  scientific_name: Posterior Superior Temporal Sulcus
+  anatomical_descriptor: left posterior superior temporal sulcus / Wernicke's area
+  yeo_network: Language
+  short_function: language comprehension; semantic processing
+  function_summary: >
+    The left posterior STS (the region historically called Wernicke's
+    area) is central to language comprehension and semantic processing.
+    It integrates phonological and lexical input into meaning.
+  destrieux_labels:
+    - G_temporal_middle
+    - S_temporal_sup
+    - G_temp_sup-Lateral
+  citations:
+    - "Hickok G, Poeppel D. The cortical organization of speech processing. Nat Rev Neurosci 2007."
+    - "Friederici AD. The brain basis of language processing: from structure to function. Physiol Rev 2011."
+
+- id: A1_AUDITORY
+  scientific_name: Primary Auditory Cortex (A1)
+  anatomical_descriptor: primary auditory cortex (Heschl's gyrus)
+  yeo_network: Auditory
+  short_function: low-level sound processing
+  function_summary: >
+    Heschl's gyrus contains the primary auditory cortex. It is the first
+    cortical relay for sound and activates strongly for any auditory
+    input. Expected to be prominently active in any audio-based brain map.
+  destrieux_labels:
+    - G_temp_sup-G_T_transv
+    - G_temp_sup-Lateral
+  citations:
+    - "Da Costa S et al. Human primary auditory cortex follows the shape of Heschl's gyrus. J Neurosci 2011."
+
+- id: PARAHIPPOCAMPAL_MEMORY
+  scientific_name: Parahippocampal Cortex
+  anatomical_descriptor: parahippocampal cortex (medial temporal lobe)
+  yeo_network: Default
+  short_function: autobiographical memory; scene context
+  function_summary: >
+    The parahippocampal cortex is part of the medial temporal lobe memory
+    system and is heavily involved in autobiographical recall and the
+    contextual binding of events. Active when remembering specific past
+    moments or imagining places.
+  destrieux_labels:
+    - G_oc-temp_med-Parahip
+    - S_oc-temp_med_and_Lingual
+  citations:
+    - "Aminoff EM, Kveraga K, Bar M. The role of the parahippocampal cortex in cognition. Trends Cogn Sci 2013."
+
+- id: ORBITOFRONTAL_VALUE
+  scientific_name: Lateral Orbitofrontal Cortex
+  anatomical_descriptor: lateral orbitofrontal cortex
+  yeo_network: Limbic
+  short_function: outcome evaluation; loss; regret
+  function_summary: >
+    The lateral orbitofrontal cortex tracks negative outcomes and is
+    implicated in regret, loss processing, and behavioral updating after
+    aversive feedback. Distinct from the vmPFC (positive valuation), the
+    lateral OFC handles 'what went wrong.'
+  destrieux_labels:
+    - G_orbital
+    - S_orbital_lateral
+  citations:
+    - "Kringelbach ML. The human orbitofrontal cortex: linking reward to hedonic experience. Nat Rev Neurosci 2005."
+    - "Coricelli G et al. Regret and its avoidance: a neuroimaging study of choice behavior. Nat Neurosci 2005."

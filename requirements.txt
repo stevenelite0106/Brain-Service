@@ -1,0 +1,35 @@
+# Space of Mind — brain-service requirements
+#
+# Pinned conservatively. PyTorch is the largest install (~2GB on CPU,
+# ~5GB on CUDA). nilearn pulls scipy + scikit-learn + matplotlib.
+#
+# tribev2 is NOT on PyPI. It must be installed from Meta's repo at deploy
+# time — see Dockerfile (we pip-install from a git URL there). This file
+# only lists what PyPI can resolve.
+
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+pydantic==2.10.4
+pyyaml==6.0.2
+python-dotenv==1.0.1
+
+# Numerical + neuroimaging stack
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.14.1
+matplotlib==3.9.3
+nilearn==0.11.0
+
+# PyTorch — install per-platform via the Dockerfile so we can pick the
+# CPU wheel by default and swap to CUDA via build arg.
+torch==2.5.1
+torchaudio==2.5.1
+
+# WhisperX is what TRIBE uses internally for word-level transcription.
+# Pinned to match what the reference repo uses against tribev2.
+whisperx==3.3.1
+
+# HuggingFace tooling — required for the gated facebook/tribev2 download
+huggingface_hub==0.27.0
+transformers==4.47.1
