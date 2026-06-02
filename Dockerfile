@@ -64,6 +64,12 @@ RUN if [ "$COMPUTE" = "gpu" ]; then \
 # ModuleNotFoundError at runtime).
 RUN pip install "git+https://github.com/facebookresearch/tribev2.git@main"
 
+# tribev2 shells out to `uvx` (Astral's `uv` tool runner) internally for
+# isolated WhisperX environments. Install uv globally so the binary is
+# on PATH at runtime — without this, TRIBE inference crashes with
+# `[Errno 2] No such file or directory: 'uvx'`.
+RUN pip install uv
+
 COPY . /app
 
 # Pre-create the cache dirs so the volume mount (if any) gets the right perms.
