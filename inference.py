@@ -9,6 +9,7 @@ CC BY-NC compliance: TRIBE v2 is non-commercial. See README.
 from __future__ import annotations
 
 import logging
+import subprocess as _subprocess_mod
 from pathlib import Path
 from typing import Tuple
 
@@ -20,6 +21,41 @@ import config
 logger = logging.getLogger(__name__)
 
 _MODEL = None  # singleton — TribeModel instance once loaded
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# WhisperX CPU compatibility shim.
+#
+# TRIBE v2 calls `uvx whisperx <audio> ...` as a subprocess for word-level
+# transcription. WhisperX's CLI defaults `--compute_type` to `float16`,
+# which ctranslate2 refuses on CPU hosts ("Requested float16 compute type,
+# but the target device or backend do not support efficient float16
+# computation."). We patch subprocess.run to inject `--compute_type int8`
+# into any whisperx invocation that doesn't already specify one.
+#
+# int8 quantization is the faster-whisper / ctranslate2 recommended setting
+# for CPU inference — ~4x faster than float32 with negligible accuracy loss
+# on speech transcription.
+# ─────────────────────────────────────────────────────────────────────────
+
+_orig_subprocess_run = _subprocess_mod.run
+
+
+def _patched_subprocess_run(cmd, *args, **kwargs):
+    try:
+        if isinstance(cmd, list):
+            cmd_strs = [str(c) for c in cmd]
+            mentions_whisperx = any("whisperx" in s.lower() for s in cmd_strs)
+            has_compute_type = any(s == "--compute_type" for s in cmd_strs)
+            if mentions_whisperx and not has_compute_type:
+                cmd = list(cmd) + ["--compute_type", "int8"]
+                logger.info("[whisperx-shim] injected --compute_type int8")
+    except Exception as exc:
+        logger.warning("[whisperx-shim] patch failed: %s", exc)
+    return _orig_subprocess_run(cmd, *args, **kwargs)
+
+
+_subprocess_mod.run = _patched_subprocess_run
 
 
 def _pick_device() -> str:
