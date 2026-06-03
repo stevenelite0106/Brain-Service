@@ -79,73 +79,115 @@ curl -X POST http://localhost:8080/render \
 
 ---
 
-## Deploying to Railway
+## Deploying to RunPod Serverless
 
 ### One-time setup
 
 1. **Get TRIBE access on HuggingFace.** Apply at
    https://huggingface.co/facebook/tribev2 — Meta approves manually,
-   typically within a day or two for research use. Create a read-only
-   token at https://huggingface.co/settings/tokens.
-2. **Create a new Railway project** pointing at this `brain-service/`
-   directory. Railway → New Project → Deploy from GitHub repo → choose
-   this repo → set the **root directory** to `brain-service/`. Railway
-   reads `Dockerfile` automatically.
-3. **Attach a persistent volume** at `/app/cache` so cold redeploys don't
-   re-download the TRIBE checkpoint, fsaverage5 mesh, and Destrieux atlas.
-   Railway → Storage → New Volume → mount path `/app/cache`. Minimum
-   recommended size: **15 GB** (TRIBE weights alone are several GB).
+   typically within a day or two for research use. Repeat for
+   https://huggingface.co/meta-llama/Llama-3.2-3B (used as TRIBE's text
+   encoder). Create a read-only token at
+   https://huggingface.co/settings/tokens.
 
-### Environment variables (set in Railway → Variables)
+2. **Build the Docker image** and push to a registry RunPod can pull from
+   (Docker Hub, GitHub Container Registry, or RunPod's own image upload).
+   From `brain-service/`:
+
+   ```powershell
+   # Build for GPU (CUDA wheels)
+   docker build --build-arg COMPUTE=gpu -t spaceofmind-brain:latest .
+
+   # Tag + push to Docker Hub (example)
+   docker tag spaceofmind-brain:latest <your-dockerhub>/spaceofmind-brain:latest
+   docker push <your-dockerhub>/spaceofmind-brain:latest
+   ```
+
+3. **Create a RunPod Network Volume** for model caches so workers don't
+   re-download multi-GB weights on every cold start. RunPod dashboard →
+   Storage → Network Volumes → New. Size: **50 GB** minimum.
+
+4. **Create a RunPod Serverless Endpoint.** RunPod dashboard → Serverless
+   → New Endpoint:
+   - **Image**: your pushed image (e.g. `docker.io/<your-dockerhub>/spaceofmind-brain:latest`)
+   - **GPU type**: pick a 24 GB GPU (L4, A4000, A5000, or RTX 4090 if available)
+   - **Container disk**: at least 20 GB
+   - **Network volume**: attach the one from step 3, mount at `/app/cache`
+   - **Max workers**: 2–3 (covers concurrent booth iPads + queue spikes)
+   - **Min active workers**: **1** during event hours (eliminates cold-start latency); 0 between events to save cost
+   - **Idle timeout**: 5 min (workers stay warm between requests within this window)
+   - **Container start command**: leave empty (Dockerfile CMD runs `handler.py`)
+   - **Environment variables**: set per the table below
+
+### Environment variables (set on the RunPod endpoint)
 
 | Variable | Required | Notes |
 |---|---|---|
-| `HF_TOKEN` | ✅ yes | Your HuggingFace token with access to `facebook/tribev2`. tribev2 reads this on first import. |
-| `SERVICE_AUTH_TOKEN` | recommended | Long random string. Vercel must send `Authorization: Bearer <this>` on every request. Defense-in-depth against drive-by traffic. |
-| `TRIBE_MODEL_ID` | optional | Defaults to `facebook/tribev2`. Override only if Meta publishes a successor checkpoint. |
-| `TOP_K_REGIONS` | optional | Defaults to `4`. How many brain regions to surface per recording. |
+| `HF_TOKEN` | ✅ yes | HuggingFace token with access to `facebook/tribev2` AND `meta-llama/Llama-3.2-3B`. |
+| `TRIBE_MODEL_ID` | optional | Defaults to `facebook/tribev2`. Override only if Meta publishes a successor. |
+| `TOP_K_REGIONS` | optional | Defaults to `4`. How many brain regions to surface per render. |
 | `OUTPUT_DPI` | optional | Defaults to `180`. PNG render resolution. |
-| `PORT` | auto | Set by Railway. Don't override. |
 
-### CPU vs GPU
+`SERVICE_AUTH_TOKEN` is no longer needed — RunPod's API key auth replaces it.
 
-This image builds for CPU by default. To run on GPU:
+### Wiring back to Vercel
 
-```bash
-# In Railway → Settings → Build → Build Args
-COMPUTE=gpu
+After your endpoint is live, RunPod will give you an Endpoint ID
+(e.g. `abc123xyz`). Add these to your Vercel project:
+
+```
+RUNPOD_ENDPOINT_ID=abc123xyz
+RUNPOD_API_KEY=<your RunPod API key from Settings → API Keys>
 ```
 
-You'll also need to provision a Railway GPU host (Settings → Compute).
-Expect inference to drop from ~30–60s on CPU to ~5–10s on GPU.
+The Vercel app reads these in [lib/brain.ts](../lib/brain.ts). If either
+is missing, the analyze pipeline skips brain render and continues — the
+rest of the analysis still ships.
 
-### First deploy
+### First call after deploy
 
-The first deploy will be slow (~10–15 min) because Railway has to build
-the ~8 GB image and TRIBE will lazy-load multi-GB of weights on the first
-request. After deploy, hit `/warmup` once to trigger the load before any
-real traffic.
+The first call to a fresh endpoint triggers:
+- Worker cold start (~30s container spin-up)
+- TRIBE model download from HF + load to GPU (~1–2 min on cold network volume)
+- WhisperX environment setup via uvx (~1 min)
+- Llama-3.2-3B download + load to GPU (~2–4 min on cold network volume)
 
-```bash
-curl -H "Authorization: Bearer $SERVICE_AUTH_TOKEN" \
-     https://your-brain-service.up.railway.app/warmup
-```
+Once the network volume is warm with all the model files, subsequent
+worker cold starts skip the downloads and only pay for VRAM load
+(~30–60s total). Set min active workers ≥ 1 for the event to eliminate
+even that.
 
-### Optional: pre-prime the full pipeline at startup
-
-By default the service loads only the **TRIBE checkpoint** + **nilearn atlases** at startup. The first real `/render` call still pays a one-time download for WhisperX (~4 GB), Llama-3.2-3B (~6 GB), and Wav2Vec2 (~1 GB) — usually 5–10 min.
-
-To eliminate that first-render delay, drop a short audio file at `brain-service/warmup-audio.wav` before building. The lifespan handler will run a full render on it during startup, populating every download cache.
-
-Quick way to make one from any existing webm/mp3:
+To warm a fresh deploy, hit the endpoint manually once:
 
 ```powershell
-ffmpeg -i path/to/any-recording.webm -t 3 -ar 16000 -ac 1 brain-service/warmup-audio.wav
+$body = @{
+  input = @{
+    audio_b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes("assets/test.wav"))
+    audio_format = "wav"
+  }
+} | ConvertTo-Json
+
+curl -X POST `
+     -H "Authorization: Bearer $env:RUNPOD_API_KEY" `
+     -H "Content-Type: application/json" `
+     -d $body `
+     "https://api.runpod.ai/v2/$env:RUNPOD_ENDPOINT_ID/runsync"
 ```
 
-3 seconds of any English speech is enough. The file ships inside the Docker image (~50–100 KB). Container startup will then take longer (~5–10 min for first deploy with cold caches; ~30s on subsequent deploys once caches land on the mounted volume), but the first real booth request is fast.
+First call: ~5–10 min (downloads + load + inference). Every call after
+that: ~30–60s.
 
-If you skip this, everything still works — the first attendee just waits longer.
+### Local dev still works
+
+The old FastAPI `app.py` is preserved for local iteration:
+
+```powershell
+uvicorn app:app --reload --host 0.0.0.0 --port 8080
+```
+
+You can test the same code paths locally before pushing the image to
+RunPod. The `handler.py` entry point is only invoked when the container
+runs under RunPod's serverless runtime.
 
 ### Wiring back to Vercel
 

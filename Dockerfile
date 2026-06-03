@@ -73,11 +73,13 @@ RUN pip install uv
 
 COPY . /app
 
-# Pre-create the cache dirs so the volume mount (if any) gets the right perms.
+# Pre-create the cache dirs so the network volume mount (if any) gets the
+# right perms. On RunPod Serverless, mount your network volume at /app/cache
+# so the multi-GB model downloads survive worker restarts.
 RUN mkdir -p /app/cache/huggingface /app/cache/nilearn /app/cache/tribe /app/cache/mpl
 
-# Railway provides $PORT at runtime; default to 8080 locally.
-ENV PORT=8080
-EXPOSE 8080
-
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+# RunPod Serverless entry point. The runpod package starts an internal
+# worker loop that pulls events from RunPod's queue and calls handler().
+# The old FastAPI app.py is preserved for local dev — run with:
+#   uvicorn app:app --host 0.0.0.0 --port 8080
+CMD ["python", "-u", "/app/handler.py"]
