@@ -122,10 +122,16 @@ def get_model():
     # ~3s per 4-word batch. For a 5-take, ~3-minute booth recording that
     # adds up to ~10 minutes — past Vercel's 300s function ceiling.
     #
-    # Llama-3.2-3B at fp16 is ~6 GB weights + activations; batch 32
-    # comfortably fits on L4 (~16 GB peak in practice). Cuts the embed
-    # stage to ~3-4 minutes. If we ever hit OOM in the worker logs, dial
-    # back to 16 — still 4x faster than default.
+    # Empirical VRAM budget — RunPod endpoint runs on a 48 GB GPU
+    # (upgraded from 24 GB L4 after the L4 OOMed at batch_size=32):
+    #   - TRIBE + Llama-3.2-3B + Wav2Vec2 weights occupy ~20 GB.
+    #   - On 24 GB L4: batch_size=32 OOMed (~800 MB short for Llama MLP
+    #     forward). batch_size=16 fit.
+    #   - On 48 GB: ~28 GB activation headroom. batch_size=32 fits with
+    #     room to spare. Cuts embed wallclock from ~5 min (at 16) to
+    #     ~2.5 min on a full 5-take recording.
+    # If we ever need to go higher, 64 should fit; beyond that, trim the
+    # text_feature.layers list (currently [0, .2, .4, .6, .8, 1.0]).
     config_update = {
         "data.text_feature.device": "auto",
         "data.text_feature.batch_size": 16,
