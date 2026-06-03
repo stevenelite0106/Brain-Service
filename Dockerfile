@@ -29,7 +29,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/app/cache/huggingface \
     NILEARN_DATA=/app/cache/nilearn \
     TRIBE_CACHE_DIR=/app/cache/tribe \
-    MPLCONFIGDIR=/app/cache/mpl
+    MPLCONFIGDIR=/app/cache/mpl \
+    TOKENIZERS_PARALLELISM=false
 
 # System deps: ffmpeg is mandatory for whisperx / torchaudio I/O.
 # libgomp + libgl + libsndfile cover scientific Python wheels that link

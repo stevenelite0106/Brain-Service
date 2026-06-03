@@ -26,3 +26,10 @@ OUTPUT_DPI = int(os.getenv("OUTPUT_DPI", "180"))
 # Optional bearer token that callers must present (defense-in-depth so a
 # random internet client can't burn through your Railway compute budget).
 SERVICE_AUTH_TOKEN = os.getenv("SERVICE_AUTH_TOKEN", "")
+
+# Escape hatch: if startup warmup is OOM-killing the container in a
+# restart loop, set SKIP_STARTUP_WARMUP=true on Railway. Container will
+# come up with only TRIBE + atlases loaded; the first real /render
+# pays the full download cost. Use this once to break the loop, then
+# unset it after bumping memory so future deploys auto-warm normally.
+SKIP_STARTUP_WARMUP = os.getenv("SKIP_STARTUP_WARMUP", "").lower() in ("1", "true", "yes")

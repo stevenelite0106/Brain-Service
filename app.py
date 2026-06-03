@@ -117,10 +117,16 @@ async def lifespan(app: FastAPI):
         logger.exception("startup [2/3] FAILED — atlases will lazy-load on first /render")
 
     # ── 3. Full warmup-render — primes WhisperX uvx env, Llama, Wav2Vec2
-    # Only runs if a warmup audio file exists in the image. If you don't
-    # ship one, the FIRST real /render call pays the download cost
-    # (~4 GB WhisperX env + several GB of Llama + ~1 GB Wav2Vec2).
-    if WARMUP_AUDIO_PATH is not None:
+    # Only runs if a warmup audio file exists in the image AND the
+    # SKIP_STARTUP_WARMUP env var isn't set. If skipped or no file,
+    # the FIRST real /render call pays the download cost.
+    if config.SKIP_STARTUP_WARMUP:
+        logger.info(
+            "startup [3/3]: SKIPPED — SKIP_STARTUP_WARMUP=true is set. "
+            "Use this to recover from an OOM restart loop after bumping "
+            "container memory. Trigger a manual /render afterward to warm caches."
+        )
+    elif WARMUP_AUDIO_PATH is not None:
         try:
             t0 = time.time()
             logger.info(
