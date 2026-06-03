@@ -33,6 +33,11 @@ torchaudio==2.5.1
 # Pinned to match what the reference repo uses against tribev2.
 whisperx==3.3.1
 
+# Used by handler.py to read 16kHz WAV duration after ffmpeg transcode.
+# Already pulled in transitively by whisperx; pinned here to make the
+# dependency explicit since our code calls it directly.
+soundfile==0.12.1
+
 # HuggingFace tooling — required for the gated facebook/tribev2 download
 huggingface_hub==0.27.0
 transformers==4.47.1

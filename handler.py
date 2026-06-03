@@ -30,11 +30,19 @@ import tempfile
 import time
 from pathlib import Path
 
+import numpy as np
 import runpod
+import soundfile as sf
 
 import inference
 import regions as regions_mod
 import render as render_mod
+
+# Cap on frames returned to the frontend. TRIBE's native sample rate is ~1
+# frame per TR (fMRI repetition time, ~1.49s) so a 3-min recording is
+# already ~120 frames. We subsample only on the rare case it exceeds this.
+# 150 frames * 20484 verts * 2 bytes (float16) = ~6 MB raw, ~2 MB gzipped.
+MAX_ACTIVATION_FRAMES = 150
 
 logging.basicConfig(
     level=logging.INFO,
@@ -143,6 +151,12 @@ def handler(event: dict) -> dict:
             decoded = regions_mod.decode(peak_vec)
             png_bytes = render_mod.render_to_png(peak_vec, decoded)
 
+            # Pack the per-frame activation tensor for browser-side
+            # playback. The frontend uses this to drive a three.js cortex
+            # in sync with the audio scrubber on the Confirmation screen.
+            audio_duration_s = float(sf.info(str(wav_path)).duration)
+            activations_packed = _pack_activations(preds, audio_duration_s, peak_t)
+
             return {
                 "brain_image_base64": base64.b64encode(png_bytes).decode("ascii"),
                 "top_regions": [
@@ -160,6 +174,7 @@ def handler(event: dict) -> dict:
                 "dominant_yeo_network": decoded.dominant_yeo_network,
                 "transcript_text": transcript,
                 "peak_timestep": int(peak_t),
+                **activations_packed,
             }
         except Exception as exc:
             logger.exception("inference pipeline failed")
@@ -181,6 +196,70 @@ def _cleanup(*paths: Path) -> None:
             p.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def _pack_activations(
+    preds: np.ndarray,
+    audio_duration_s: float,
+    peak_t_orig: int,
+) -> dict:
+    """
+    Convert TRIBE's (T, V) float32 tensor into a transport-friendly payload
+    for the browser-side cortex viewer:
+      - subsample T to <= MAX_ACTIVATION_FRAMES along a uniform time grid
+      - normalize globally so the shader colormap stays consistent across
+        the whole recording (per-frame norm would make every frame look
+        equally intense, defeating the visualization)
+      - quantize to float16 (halves payload; precision loss is irrelevant
+        for a colormap with ~256 distinguishable steps)
+      - generate frame_times in seconds so the frontend can look up the
+        active frame from audio.currentTime
+
+    Returns a dict whose keys are spliced into handler()'s response. Layout
+    of `activations_b64` is row-major (T, V) float16, little-endian — the
+    JS side reads it as Uint16Array and uploads to a half-float DataTexture.
+    """
+    T_orig, V = preds.shape
+
+    # Subsample frames if needed; record which original indices we kept so
+    # the peak_timestep we hand back stays consistent with the binary.
+    if T_orig > MAX_ACTIVATION_FRAMES:
+        kept = np.linspace(0, T_orig - 1, MAX_ACTIVATION_FRAMES, dtype=np.int64)
+    else:
+        kept = np.arange(T_orig, dtype=np.int64)
+    subsampled = preds[kept]
+    T = subsampled.shape[0]
+
+    # Global normalization to [-1, 1] so the shader's colormap LUT can be
+    # a fixed 256-step gradient. Use 99th-percentile abs to clip the long
+    # tail without losing typical-frame contrast.
+    abs_max = float(np.percentile(np.abs(subsampled), 99))
+    if abs_max < 1e-6:
+        abs_max = 1.0
+    normalized = np.clip(subsampled / abs_max, -1.0, 1.0).astype(np.float16)
+
+    # Uniform time grid over the audio duration. TRIBE outputs are
+    # regression onto an fMRI TR sampling, which is approximately linear
+    # in audio time — uniform spacing is the right model.
+    if T == 1:
+        frame_times = [0.0]
+    else:
+        frame_times = np.linspace(0.0, audio_duration_s, T).tolist()
+
+    # Map the original-index peak into the subsampled space so the
+    # frontend can still highlight the same moment.
+    peak_t_packed = int(np.argmin(np.abs(kept - peak_t_orig)))
+
+    return {
+        "activations_b64": base64.b64encode(normalized.tobytes()).decode("ascii"),
+        "activations_dtype": "float16",
+        "activations_layout": "row_major_TxV",
+        "frame_count": int(T),
+        "vertex_count": int(V),
+        "frame_times": frame_times,
+        "peak_timestep_packed": peak_t_packed,
+        "audio_duration_seconds": audio_duration_s,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────
