@@ -128,7 +128,7 @@ def get_model():
     # back to 16 — still 4x faster than default.
     config_update = {
         "data.text_feature.device": "auto",
-        "data.text_feature.batch_size": 32,
+        "data.text_feature.batch_size": 16,
         "data.audio_feature.device": "auto",
     }
 
