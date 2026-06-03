@@ -80,13 +80,26 @@ _worker_init()
 # ─────────────────────────────────────────────────────────────────────────
 def handler(event: dict) -> dict:
     """
-    Input event shape:
+    Input event shape (preferred):
       {
         "input": {
-          "audio_b64": "<base64-encoded audio bytes>",
+          "audio_takes_b64": ["<take1 base64>", "<take2 base64>", ...],
           "audio_format": "webm" | "wav" | "ogg" | "m4a"   (optional, default "webm")
         }
       }
+
+    Legacy shape (kept for backward compat with older Vercel deploys):
+      {
+        "input": {
+          "audio_b64": "<base64-encoded audio bytes>",
+          "audio_format": "webm" | ...
+        }
+      }
+
+    Multi-take inputs are concatenated with ffmpeg's concat demuxer (or
+    filter, if the demuxer fails) so TRIBE inference covers the full
+    recording. This is what powers the Confirmation-screen BrainCanvas
+    syncing with every take — not just the longest one.
 
     Output shape on success:
       {
@@ -94,7 +107,11 @@ def handler(event: dict) -> dict:
         "top_regions": [ {id, scientific_name, ...}, ... ],
         "dominant_yeo_network": "Default",
         "transcript_text": "...",
-        "peak_timestep": 12
+        "peak_timestep": 12,
+        "activations_b64": "...",       # see _pack_activations
+        "frame_times": [...],
+        "audio_duration_seconds": 142.7,
+        ...
       }
 
     Output shape on error:
@@ -102,45 +119,46 @@ def handler(event: dict) -> dict:
     """
     try:
         payload = event.get("input") or {}
+        takes_b64 = payload.get("audio_takes_b64")
         audio_b64 = payload.get("audio_b64")
-        if not audio_b64:
-            return {"error": "audio_b64 required in input"}
+        if not takes_b64 and not audio_b64:
+            return {"error": "audio_takes_b64 or audio_b64 required in input"}
+        if takes_b64 and not isinstance(takes_b64, list):
+            return {"error": "audio_takes_b64 must be a list of base64 strings"}
 
-        audio_bytes = base64.b64decode(audio_b64)
         audio_format = (payload.get("audio_format") or "webm").lstrip(".")
         suffix = f".{audio_format}"
 
-        # Persist upload to a temp file (ffmpeg + TRIBE need real paths).
-        # Use distinct in/out paths so ffmpeg doesn't refuse to overwrite
-        # its own input when the upload happens to already be .wav.
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_in:
-            tmp_in.write(audio_bytes)
-            raw_path = Path(tmp_in.name)
+        # Persist each input take to its own tempfile so ffmpeg can read
+        # them by path. Single legacy input is treated as a length-1 list.
+        if takes_b64:
+            take_bytes_list = [base64.b64decode(b) for b in takes_b64]
+        else:
+            take_bytes_list = [base64.b64decode(audio_b64)]
+
+        raw_paths: list[Path] = []
+        for chunk in take_bytes_list:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_in:
+                tmp_in.write(chunk)
+                raw_paths.append(Path(tmp_in.name))
+
         with tempfile.NamedTemporaryFile(suffix=".16k.wav", delete=False) as tmp_out:
             wav_path = Path(tmp_out.name)
 
         try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    "-i", str(raw_path),
-                    "-ar", "16000",  # 16 kHz — WhisperX standard
-                    "-ac", "1",      # mono
-                    str(wav_path),
-                ],
-                check=True, capture_output=True,
-            )
+            _concat_and_transcode(raw_paths, wav_path)
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode("utf-8", "ignore") if exc.stderr else "(empty)"
-            logger.error("ffmpeg transcode failed:\n%s", stderr)
-            _cleanup(raw_path, wav_path)
+            logger.error("ffmpeg concat/transcode failed:\n%s", stderr)
+            _cleanup(*raw_paths, wav_path)
             return {"error": f"audio transcode failed: {stderr.strip()[:400]}"}
 
-        # ffmpeg succeeded; the raw upload is no longer needed.
-        try:
-            raw_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        # ffmpeg succeeded; the raw uploads are no longer needed.
+        for p in raw_paths:
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         try:
             logger.info("running TRIBE on %s", wav_path)
@@ -196,6 +214,81 @@ def _cleanup(*paths: Path) -> None:
             p.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def _concat_and_transcode(inputs: list[Path], out_wav: Path) -> None:
+    """
+    Concatenate one or more audio takes into a single 16 kHz mono WAV.
+
+    For a single input we skip concat and go straight to transcode. For
+    multiple inputs we try ffmpeg's concat demuxer first (fast — same-codec
+    WebM/Opus from MediaRecorder remux without re-encoding). If that fails
+    on header drift between recordings, we fall back to the concat filter
+    which decodes + re-encodes everything (slower but tolerant).
+
+    Raises subprocess.CalledProcessError if both paths fail; the caller
+    surfaces the error in the RunPod response.
+    """
+    if len(inputs) == 1:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(inputs[0]),
+                "-ar", "16000", "-ac", "1",
+                str(out_wav),
+            ],
+            check=True, capture_output=True,
+        )
+        return
+
+    # ── Concat demuxer (fast path) ─────────────────────────────────────
+    # Write a concat list file pointing at each input. -safe 0 lets us
+    # pass absolute paths (otherwise ffmpeg rejects them as "unsafe").
+    list_path = out_wav.with_suffix(".concat.txt")
+    list_path.write_text(
+        "\n".join(f"file '{p.as_posix()}'" for p in inputs),
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "concat", "-safe", "0",
+                "-i", str(list_path),
+                "-ar", "16000", "-ac", "1",
+                str(out_wav),
+            ],
+            check=True, capture_output=True,
+        )
+        logger.info("concat demuxer succeeded for %d takes", len(inputs))
+        return
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", "ignore") if exc.stderr else "(empty)"
+        logger.warning(
+            "concat demuxer failed (likely header drift across takes); "
+            "falling back to concat filter. stderr: %s",
+            stderr.strip()[:300],
+        )
+    finally:
+        try:
+            list_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # ── Concat filter (re-encode fallback) ─────────────────────────────
+    # Builds: -i in1 -i in2 ... -filter_complex "[0:a][1:a]concat=n=N:v=0:a=1[out]"
+    cmd: list[str] = ["ffmpeg", "-y", "-loglevel", "error"]
+    for p in inputs:
+        cmd.extend(["-i", str(p)])
+    streams = "".join(f"[{i}:a]" for i in range(len(inputs)))
+    cmd.extend([
+        "-filter_complex", f"{streams}concat=n={len(inputs)}:v=0:a=1[out]",
+        "-map", "[out]",
+        "-ar", "16000", "-ac", "1",
+        str(out_wav),
+    ])
+    subprocess.run(cmd, check=True, capture_output=True)
+    logger.info("concat filter succeeded for %d takes", len(inputs))
 
 
 def _pack_activations(
