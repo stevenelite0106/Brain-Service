@@ -115,8 +115,20 @@ def get_model():
     config.TRIBE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     # `device: "auto"` lets the underlying feature extractors place themselves.
+    #
+    # batch_size override: TRIBE's default text_feature config sets
+    # batch_size=4 (see facebookresearch/tribev2 grids/defaults.py), which
+    # leaves a 24 GB L4 almost idle and bottlenecks the whole pipeline at
+    # ~3s per 4-word batch. For a 5-take, ~3-minute booth recording that
+    # adds up to ~10 minutes — past Vercel's 300s function ceiling.
+    #
+    # Llama-3.2-3B at fp16 is ~6 GB weights + activations; batch 32
+    # comfortably fits on L4 (~16 GB peak in practice). Cuts the embed
+    # stage to ~3-4 minutes. If we ever hit OOM in the worker logs, dial
+    # back to 16 — still 4x faster than default.
     config_update = {
         "data.text_feature.device": "auto",
+        "data.text_feature.batch_size": 32,
         "data.audio_feature.device": "auto",
     }
 
