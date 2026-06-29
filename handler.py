@@ -15,9 +15,10 @@ Worker lifecycle on RunPod Serverless:
   3. After IDLE_TIMEOUT (configured in the RunPod endpoint settings),
      RunPod shuts the worker down. Next request restarts the cycle.
 
-For consistent latency during the event, set min active workers ≥ 1 in
-the RunPod endpoint configuration. Costs a small idle fee but eliminates
-the cold-start hit.
+For cost-efficient booth use, keep active workers at 0 (flex) and let
+the NYTech app call { "input": { "warmup_only": true } } at Intake to
+spin up the worker during recording (~$0.01–0.03). Only use min active
+workers ≥ 1 if you need guaranteed zero cold-start and accept ~$30+/day idle.
 
 License caveat: TRIBE v2 is CC BY-NC. Research / internal demos only.
 """
@@ -88,6 +89,11 @@ def handler(event: dict) -> dict:
         }
       }
 
+    Warmup-only (no audio required — models already loaded in _worker_init()):
+      {
+        "input": { "warmup_only": true }
+      }
+
     Legacy shape (kept for backward compat with older Vercel deploys):
       {
         "input": {
@@ -119,6 +125,10 @@ def handler(event: dict) -> dict:
     """
     try:
         payload = event.get("input") or {}
+        if payload.get("warmup_only"):
+            logger.info("warmup_only job — models already loaded in _worker_init()")
+            return {"ok": True, "warmed": True, "message": "worker ready"}
+
         takes_b64 = payload.get("audio_takes_b64")
         audio_b64 = payload.get("audio_b64")
         if not takes_b64 and not audio_b64:
