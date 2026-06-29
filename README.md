@@ -113,9 +113,11 @@ curl -X POST http://localhost:8080/render \
    - **GPU type**: pick a 24 GB GPU (L4, A4000, A5000, or RTX 4090 if available)
    - **Container disk**: at least 20 GB
    - **Network volume**: attach the one from step 3, mount at `/app/cache`
-   - **Max workers**: 2–3 (covers concurrent booth iPads + queue spikes)
-   - **Min active workers**: **1** during event hours (eliminates cold-start latency); 0 between events to save cost
-   - **Idle timeout**: 5 min (workers stay warm between requests within this window)
+   - **Max workers**: **1** for a single iPad booth (2 only if you truly need concurrent renders)
+   - **Active workers**: **0** (flex — scale to zero; pennies per render, $0 overnight)
+   - **Idle timeout**: **300 sec** (keeps worker warm between booth visitors during an event)
+   - **FlashBoot**: enabled (Standard)
+   - **Execution timeout**: **600 sec**
    - **Container start command**: leave empty (Dockerfile CMD runs `handler.py`)
    - **Environment variables**: set per the table below
 
@@ -154,10 +156,23 @@ The first call to a fresh endpoint triggers:
 
 Once the network volume is warm with all the model files, subsequent
 worker cold starts skip the downloads and only pay for VRAM load
-(~30–60s total). Set min active workers ≥ 1 for the event to eliminate
-even that.
+(~30–60s total).
 
-To warm a fresh deploy, hit the endpoint manually once:
+**Cheap warmup (no audio):** the NYTech booth calls this automatically at
+Intake via `POST /api/brain/warmup`, which submits `{ "warmup_only": true }`
+to RunPod `/run`. You can also smoke-test manually:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $RUNPOD_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"warmup_only":true}}' \
+  "https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/runsync"
+```
+
+Expect `{ "ok": true, "warmed": true }` once TRIBE + atlases are loaded.
+
+**Full render smoke test** (optional, uses real inference):
 
 ```powershell
 $body = @{
@@ -174,8 +189,8 @@ curl -X POST `
      "https://api.runpod.ai/v2/$env:RUNPOD_ENDPOINT_ID/runsync"
 ```
 
-First call: ~5–10 min (downloads + load + inference). Every call after
-that: ~30–60s.
+First cold call with empty volume: ~5–10 min (downloads + load). Warm worker:
+~30–90s per booth recording.
 
 ### Local dev still works
 
