@@ -9,6 +9,7 @@ CC BY-NC compliance: TRIBE v2 is non-commercial. See README.
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess as _subprocess_mod
 from pathlib import Path
 from typing import Tuple
@@ -27,18 +28,22 @@ _MODEL = None  # singleton — TribeModel instance once loaded
 # WhisperX CPU compatibility shim.
 #
 # TRIBE v2 calls `uvx whisperx <audio> ...` as a subprocess for word-level
-# transcription. WhisperX's CLI defaults `--compute_type` to `float16`,
-# which ctranslate2 refuses on CPU hosts ("Requested float16 compute type,
-# but the target device or backend do not support efficient float16
-# computation."). We patch subprocess.run to inject `--compute_type int8`
-# into any whisperx invocation that doesn't already specify one.
+# transcription. Two problems with that default:
 #
-# int8 quantization is the faster-whisper / ctranslate2 recommended setting
-# for CPU inference — ~4x faster than float32 with negligible accuracy loss
-# on speech transcription.
+# 1. `uvx` resolves whisperx + deps at runtime with no version pins. Fresh
+#    workers pull latest pyannote/lightning/torch, which breaks VAD with:
+#      AttributeError: 'generator' object has no attribute 'data'
+#    We redirect to the container's pinned `whisperx` CLI instead.
+#
+# 2. WhisperX's CLI defaults `--compute_type` to `float16`, which
+#    ctranslate2 refuses on CPU hosts. We rewrite compute_type/device to
+#    match the actual hardware (float16+cuda on GPU, int8+cpu on CPU).
 # ─────────────────────────────────────────────────────────────────────────
 
 _orig_subprocess_run = _subprocess_mod.run
+
+# Pinned in requirements.txt / Dockerfile — must stay in sync with tribev2.
+_WHISPERX_BIN = shutil.which("whisperx") or "whisperx"
 
 
 def _force_arg(cmd: list, flag: str, value: str) -> tuple[list, str | None]:
@@ -55,24 +60,26 @@ def _force_arg(cmd: list, flag: str, value: str) -> tuple[list, str | None]:
     return new_cmd, None
 
 
+def _redirect_uvx_whisperx(cmd: list) -> tuple[list, bool]:
+    """Replace tribev2's `uvx whisperx ...` with our pinned container binary."""
+    if len(cmd) >= 2 and Path(str(cmd[0])).name == "uvx" and str(cmd[1]).lower() == "whisperx":
+        redirected = [_WHISPERX_BIN, *cmd[2:]]
+        logger.info("[whisperx-shim] redirecting uvx whisperx -> %s", _WHISPERX_BIN)
+        return redirected, True
+    return cmd, False
+
+
 def _patched_subprocess_run(cmd, *args, **kwargs):
     """
-    Force whisperx invocations to a compute_type/device combo that matches
-    the actual hardware.
-
-    tribev2.eventstransforms._get_transcript_from_audio hard-codes the
-    whisperx CLI command including --compute_type and --device assuming
-    CUDA. On a CPU host this raises:
-        ValueError: Requested float16 compute type, but the target device
-        or backend do not support efficient float16 computation.
-
-    On GPU hosts we want the opposite: float16 + cuda for maximum speed.
-    Detect at call time which we have and rewrite tribev2's args.
+    Intercept tribev2's whisperx subprocess calls:
+      - use pinned container whisperx instead of unpinned `uvx whisperx`
+      - force compute_type/device to match available hardware
     """
     try:
         if isinstance(cmd, list):
             cmd_strs = [str(c) for c in cmd]
             if any("whisperx" in s.lower() for s in cmd_strs):
+                cmd, _ = _redirect_uvx_whisperx(cmd)
                 if torch.cuda.is_available():
                     target_ct, target_dev = "float16", "cuda"
                 else:

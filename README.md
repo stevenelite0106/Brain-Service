@@ -110,7 +110,12 @@ curl -X POST http://localhost:8080/render \
 4. **Create a RunPod Serverless Endpoint.** RunPod dashboard → Serverless
    → New Endpoint:
    - **Image**: your pushed image (e.g. `docker.io/<your-dockerhub>/spaceofmind-brain:latest`)
-   - **GPU type**: pick a 24 GB GPU (L4, A4000, A5000, or RTX 4090 if available)
+   - **GPU type**: restrict to **L4** and/or **A100** only (up to 3 types in priority order).
+     Do **not** leave "Any GPU" enabled — RunPod may assign Blackwell (sm_120) GPUs
+     that PyTorch 2.5.1 does not support yet. Recommended priority:
+     1. NVIDIA L4 (24 GB, cost-effective for booth use)
+     2. NVIDIA A100 80GB (fallback if L4 unavailable)
+     Uncheck B200, H100, RTX PRO 6000, and other Blackwell/Hopper SKUs.
    - **Container disk**: at least 20 GB
    - **Network volume**: attach the one from step 3, mount at `/app/cache`
    - **Max workers**: **1** for a single iPad booth (2 only if you truly need concurrent renders)
@@ -151,7 +156,7 @@ rest of the analysis still ships.
 The first call to a fresh endpoint triggers:
 - Worker cold start (~30s container spin-up)
 - TRIBE model download from HF + load to GPU (~1–2 min on cold network volume)
-- WhisperX environment setup via uvx (~1 min)
+- WhisperX transcription on first render (~1 min; uses pinned container install, not uvx)
 - Llama-3.2-3B download + load to GPU (~2–4 min on cold network volume)
 
 Once the network volume is warm with all the model files, subsequent
