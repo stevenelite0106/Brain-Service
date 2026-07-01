@@ -60,13 +60,79 @@ def _force_arg(cmd: list, flag: str, value: str) -> tuple[list, str | None]:
     return new_cmd, None
 
 
+# uvx/`uv tool run` options that consume a following value. We skip past
+# these (option + value) when locating the tool token in a
+# `uvx [OPTS] TOOL[@ver] [TOOL-ARGS]` invocation, so a `--from`/`--python`
+# arg is never mistaken for the tool name.
+_UVX_VALUE_OPTS = {
+    "--from", "--with", "--with-requirements", "--with-editable",
+    "--python", "-p", "--index", "--index-url", "--extra-index-url",
+    "--default-index", "--constraint", "-c", "--override",
+    "--index-strategy", "--prerelease", "--resolution", "--refresh-package",
+    "--cache-dir", "--directory", "--project", "--config-file",
+}
+
+
+def _uvx_tool_start(cmd_strs: list) -> int | None:
+    """If cmd is a `uvx ...` or `uv tool run ...` launcher, return the index
+    where uvx's own options end and the tool spec begins. Else None."""
+    if not cmd_strs:
+        return None
+    exe = Path(cmd_strs[0]).name.lower()
+    if exe in ("uvx", "uvx.exe"):
+        return 1
+    if (
+        exe in ("uv", "uv.exe")
+        and len(cmd_strs) >= 3
+        and cmd_strs[1] == "tool"
+        and cmd_strs[2] == "run"
+    ):
+        return 3
+    return None
+
+
 def _redirect_uvx_whisperx(cmd: list) -> tuple[list, bool]:
-    """Replace tribev2's `uvx whisperx ...` with our pinned container binary."""
-    if len(cmd) >= 2 and Path(str(cmd[0])).name == "uvx" and str(cmd[1]).lower() == "whisperx":
-        redirected = [_WHISPERX_BIN, *cmd[2:]]
-        logger.info("[whisperx-shim] redirecting uvx whisperx -> %s", _WHISPERX_BIN)
-        return redirected, True
-    return cmd, False
+    """Replace tribev2's `uvx whisperx ...` with our pinned container binary.
+
+    Handles every uvx launch shape tribev2 might emit, not just the literal
+    ["uvx", "whisperx", ...]:
+      - uvx whisperx@3.3.1 audio.wav
+      - uvx --from whisperx==3.3.1 whisperx audio.wav
+      - uvx --python 3.11 whisperx audio.wav
+      - uv tool run whisperx audio.wav
+      - absolute paths to the uvx/uv binary
+    Everything after the tool token is preserved as the whisperx CLI args, so
+    the pinned container whisperx (3.3.1) runs instead of an uvx-resolved
+    latest that floats pyannote/lightning and breaks VAD.
+    """
+    cmd_strs = [str(c) for c in cmd]
+    start = _uvx_tool_start(cmd_strs)
+    if start is None:
+        return cmd, False
+
+    # Skip uvx's own options (and any values they consume) to find the tool.
+    i = start
+    while i < len(cmd_strs):
+        tok = cmd_strs[i]
+        if tok.startswith("-"):
+            i += 2 if tok in _UVX_VALUE_OPTS else 1
+            continue
+        break
+    if i >= len(cmd_strs):
+        return cmd, False
+
+    # Tool spec may carry a version/source suffix (whisperx@3.3.1,
+    # whisperx==3.3.1). Match on the bare package name.
+    tool_name = cmd_strs[i].split("@")[0].split("==")[0]
+    if tool_name.lower() != "whisperx":
+        return cmd, False
+
+    redirected = [_WHISPERX_BIN, *cmd[i + 1:]]
+    logger.info(
+        "[whisperx-shim] redirecting `%s` -> pinned %s",
+        " ".join(cmd_strs[: i + 1]), _WHISPERX_BIN,
+    )
+    return redirected, True
 
 
 def _patched_subprocess_run(cmd, *args, **kwargs):
@@ -79,7 +145,16 @@ def _patched_subprocess_run(cmd, *args, **kwargs):
         if isinstance(cmd, list):
             cmd_strs = [str(c) for c in cmd]
             if any("whisperx" in s.lower() for s in cmd_strs):
-                cmd, _ = _redirect_uvx_whisperx(cmd)
+                # Log the raw command so we can confirm the exact uvx shape
+                # tribev2 emits if the redirect ever misses again.
+                logger.info("[whisperx-shim] intercepted subprocess: %s", cmd_strs)
+                cmd, redirected = _redirect_uvx_whisperx(cmd)
+                if not redirected:
+                    logger.warning(
+                        "[whisperx-shim] NOT redirected — unpinned uvx whisperx "
+                        "will run and may float pyannote/lightning. cmd=%s",
+                        cmd_strs,
+                    )
                 if torch.cuda.is_available():
                     target_ct, target_dev = "float16", "cuda"
                 else:
